@@ -1,5 +1,6 @@
 #include <cmath>
 #include <iostream>
+#include <utility>
 
 #include "open_sans_semibold.h"
 #include <SFML/Graphics.hpp>
@@ -38,7 +39,16 @@ int main() {
     fullscreenTriangle[2].texCoords = {0, 2};
     // load vertex and fragment shaders:
     sf::Shader shader(std::filesystem::path{"main.vert"}, std::filesystem::path{"main.frag"});
-    // ... other shaders can go here...
+    // Copies a texture onto whatever it's drawn to.
+    sf::Shader copyShader(std::filesystem::path{"main.vert"}, std::filesystem::path{"copy.frag"});
+
+    // Double buffer for reprojection
+    sf::RenderTexture bufferA(window.getSize());
+    sf::RenderTexture bufferB(window.getSize());
+    bufferA.setSmooth(true);
+    bufferB.setSmooth(true);
+    sf::RenderTexture* front = &bufferA;
+    sf::RenderTexture* back = &bufferB;
 
     sf::Font openSansFont(EmbeddedFonts::OpenSans_SemiBold_ttf,
                           EmbeddedFonts::OpenSans_SemiBold_ttf_len);
@@ -57,6 +67,13 @@ int main() {
     sf::Vector2f camCenterWorld{0.f, 0.f};
     int maxIters = INIT_ITERS;
 
+    // State of the previous frame, for reprojection.
+    sf::Vector2f oldC = c;
+    float oldWorldUnitsPerPixel = worldUnitsPerPixel;
+    sf::Vector2f oldCamCenterWorld = camCenterWorld;
+    sf::Vector2f oldWindowSize(window.getSize());
+    bool historyInvalid = true;
+
     int i = -1;
     while (window.isOpen()) {
         ++i;
@@ -73,6 +90,15 @@ int main() {
                 }
             } else if (const auto* scrolled = e->getIf<sf::Event::MouseWheelScrolled>()) {
                 worldUnitsPerPixel *= std::pow(1.01, scrolled->delta);
+                moved = true;
+            } else if (const auto* resized = e->getIf<sf::Event::Resized>()) {
+                // Keep the text unstretched and the buffers the same size as the window.
+                window.setView(sf::View(sf::FloatRect({0.f, 0.f}, sf::Vector2f(resized->size))));
+                if (!bufferA.resize(resized->size) || !bufferB.resize(resized->size)) {
+                    std::cerr << "Failed to resize render textures\n";
+                    return 1;
+                }
+                historyInvalid = true;
                 moved = true;
             }
         }
@@ -113,18 +139,44 @@ int main() {
         } else {
             maxIters = std::min(maxIters * 2, TRUE_MAX_ITERS);
         }
-        // TODO set shader uniforms here...
+        if (c != oldC) {
+            historyInvalid = true; 
+        }
 
+        const sf::Vector2f windowSize(window.getSize());
+        shader.setUniform("c", c);
+        shader.setUniform("MAX_ITERS", maxIters);
+        shader.setUniform("TRUE_MAX_ITERS", TRUE_MAX_ITERS);
+        shader.setUniform("windowSizePixels", windowSize);
+        shader.setUniform("camCenterWorld", camCenterWorld);
+        shader.setUniform("camWorldUnitsPerPixel", worldUnitsPerPixel);
+        shader.setUniform("oldWindowSizePixels", oldWindowSize);
+        shader.setUniform("oldCamCenterWorld", oldCamCenterWorld);
+        shader.setUniform("oldCamWorldUnitsPerPixel", oldWorldUnitsPerPixel);
+        shader.setUniform("historyInvalid", historyInvalid);
+        shader.setUniform("prevFrame", back->getTexture());
+
+        // Render this frame into the front buffer
+        front->draw(fullscreenTriangle, &shader);
+        front->display();
+
+        // Blit the front buffer to the window.
+        copyShader.setUniform("toCopy", front->getTexture());
         window.clear(sf::Color::Black);
-        // TODO something.draw(fullscreenTriangle, &shader);
-        // this might change as you finish more parts!
+        window.draw(fullscreenTriangle, &copyShader);
         cText.setString("c = (" + std::to_string(c.x) + ", " + std::to_string(c.y) + ")");
         cTextShadow.setString("c = (" + std::to_string(c.x) + ", " + std::to_string(c.y) + ")");
         window.draw(cTextShadow);
         window.draw(cText);
         window.display();
 
-        // TODO (reprojection)... update "old" states
+        // Update "old" states for reprojection in the next frame.
+        std::swap(front, back);
+        oldC = c;
+        oldWorldUnitsPerPixel = worldUnitsPerPixel;
+        oldCamCenterWorld = camCenterWorld;
+        oldWindowSize = windowSize;
+        historyInvalid = false;
     }
     return 0;
 }
